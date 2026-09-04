@@ -22,6 +22,30 @@ Then you can chat like:
   You: Now where can I get desserts near me
 """
 
+#!/usr/bin/env python3
+"""
+final.py — Conversational wrapper over Phase_2 + nlp_layer
+with context management so follow-up questions reuse the last results.
+
+Files expected in the same folder:
+  - Phase_2.py  (your main geo-food pipeline)
+  - nlp_layer.py
+
+Example usage (CLI):
+
+  python final.py --lat 17.3850 --lon 78.4867
+
+Then you can chat like:
+  You: Nearest biryani under 300
+  You: Top 5 places
+  You: Best one
+  You: Show me details of second place
+  You: Nearest one
+  You: Is it open now?
+  You: What are the opening timings?
+  You: Now where can I get desserts near me
+"""
+
 import argparse
 import logging
 import re
@@ -156,20 +180,67 @@ class GeoFoodSession:
                 return self._handle_new_search(user_text)
             return self._handle_follow_up(user_text)
 
+    # ---------- STRUCTURED ENTRY POINT (for local-LLM pipeline) ----------
+
+    def handle_message_structured(self, user_text: str) -> Dict[str, Any]:
+        """
+        Same intent routing as handle_message(), but returns the
+        structured JSON (intent + cards + raw data) instead of a
+        pre-written prose reply. Intended for callers (e.g. an HTTP
+        endpoint) that will hand this JSON to a local LLM to phrase
+        the final natural-language answer themselves.
+        """
+        user_text = (user_text or "").strip()
+        if not user_text:
+            return {
+                "intent": "empty_query",
+                "message": "Please type a query like 'Nearest biryani under 300'.",
+                "cards": [],
+            }
+
+        is_new_search = self._is_new_search_intent(user_text) or not self.last_geo_data
+
+        try:
+            if is_new_search:
+                self._run_new_search(user_text)
+                intent = "new_search"
+            else:
+                intent = "follow_up"
+        except Exception as e:
+            logging.exception("Error handling structured message")
+            return {
+                "intent": "error",
+                "message": f"Something went wrong while searching: {e}",
+                "cards": [],
+            }
+
+        nlp_answer = self.last_nlp_answer or {"overall_summary": "", "cards": []}
+
+        return {
+            "intent": intent,
+            "query": self.last_query,
+            "dish": (self.last_geo_data or {}).get("dish"),
+            "user_city": (self.last_geo_data or {}).get("user_location", {}).get("city"),
+            "focus_index": self.focus_index,
+            "cards": nlp_answer.get("cards", []),
+            "raw_user_text": user_text,
+        }
+
     # ---------- NEW SEARCH FLOW (CALLS Phase_2 + nlp_layer) ----------
 
-    def _handle_new_search(self, query: str) -> str:
-        try:
-            geo_data = geo_core.find_places(
-                query,
-                lat=self.lat,
-                lon=self.lon,
-                top_k=self.top_k,
-                only_open=False,
-            )
-        except Exception as e:
-            logging.exception("Error in find_places")
-            return f"Something went wrong while searching: {e}"
+    def _run_new_search(self, query: str) -> None:
+        """
+        Runs the search + builds self.last_nlp_answer / related state,
+        without formatting a prose reply. Shared by _handle_new_search()
+        (prose path) and handle_message_structured() (JSON path).
+        """
+        geo_data = geo_core.find_places(
+            query,
+            lat=self.lat,
+            lon=self.lon,
+            top_k=self.top_k,
+            only_open=False,
+        )
 
         self.last_geo_data = geo_data
         self.last_query = query
@@ -198,6 +269,15 @@ class GeoFoodSession:
 
         # By default, focus on the top result
         self.focus_index = 0 if places_for_layer else None
+
+    def _handle_new_search(self, query: str) -> str:
+        try:
+            self._run_new_search(query)
+        except Exception as e:
+            logging.exception("Error in find_places")
+            return f"Something went wrong while searching: {e}"
+
+        nlp_answer = self.last_nlp_answer or {"overall_summary": "", "cards": []}
 
         # Human-readable response
         lines: List[str] = []

@@ -3,6 +3,7 @@ import asyncio
 import json
 from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from pydantic import BaseModel
 
 # Import the session logic from your existing final.py
 try:
@@ -21,6 +22,62 @@ app = FastAPI(title="Geo-Food Assistant API")
 async def root():
     """Health check endpoint."""
     return {"status": "ok", "message": "Geo-Food WebSocket API is running. Connect to /ws/chat."}
+
+
+class QueryRequest(BaseModel):
+    query: str
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    top_k: int = 5
+    # Pass a convoId if you want per-conversation session state (follow-ups
+    # like "show details of the second place") to work across requests.
+    session_id: Optional[str] = None
+
+
+# In-memory session store keyed by session_id, so follow-up questions in the
+# same conversation reuse the previous search context (last results, focus
+# index, etc). This resets if the server restarts — fine for a local dev
+# setup; swap for a real store (Redis, DB row) if this needs to survive
+# restarts or run across multiple worker processes.
+_sessions: dict[str, "GeoFoodSession"] = {}
+
+
+def _get_or_create_session(session_id: Optional[str], lat: Optional[float], lon: Optional[float], top_k: int):
+    if not GeoFoodSession:
+        return None
+    if not session_id:
+        # No session id supplied -> stateless one-off session (no follow-up memory)
+        return GeoFoodSession(lat=lat, lon=lon, top_k=top_k)
+    if session_id not in _sessions:
+        _sessions[session_id] = GeoFoodSession(lat=lat, lon=lon, top_k=top_k)
+    return _sessions[session_id]
+
+
+@app.post("/query")
+async def query_endpoint(payload: QueryRequest):
+    """
+    Plain HTTP endpoint for the Next.js orchestrator.
+
+    Takes a raw user query + optional lat/lon/session_id, runs it through
+    the geo-food pipeline (Phase_2 + nlp_layer via final.GeoFoodSession),
+    and returns STRUCTURED JSON only (intent + cards) — no prose summary.
+    The caller (Next.js /api/chat route) is expected to hand this JSON to
+    the local LLM (Ollama) to phrase the actual user-facing reply.
+    """
+    if not GeoFoodSession:
+        return {"intent": "error", "message": "Server misconfiguration: GeoFoodSession not found.", "cards": []}
+
+    session = _get_or_create_session(payload.session_id, payload.lat, payload.lon, payload.top_k)
+
+    # find_places / scraping is blocking, so run it off the event loop
+    # thread (same reasoning as the websocket handler below).
+    try:
+        result = await asyncio.to_thread(session.handle_message_structured, payload.query)
+    except Exception as e:
+        logging.error(f"Error in /query: {e}")
+        return {"intent": "error", "message": f"Internal server error: {e}", "cards": []}
+
+    return result
 
 @app.websocket("/ws/chat")
 async def websocket_endpoint(
