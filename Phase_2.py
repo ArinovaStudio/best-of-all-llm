@@ -78,11 +78,11 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 # ---------------- CONFIG ----------------
-GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY") or "AIzaSyBFoL8jAGilROTcdLAXgYInHoYaRZXw3Hg"
+GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
 
-'''
-FOURSQUARE_API_KEY = os.getenv("FOURSQUARE_API_KEY") or "fsq3ZW+ma0ksomWlYkZYUBMMs7jN3rgr1ZZ0k9DmyU1aL8U="
-'''
+
+FOURSQUARE_API_KEY = os.getenv("FOURSQUARE_API_KEY")
+
 
 W_PREF = 0.30
 W_RATING = 0.25

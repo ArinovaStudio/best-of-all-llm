@@ -1,3 +1,5 @@
+fastapi
+uvicorn[standard]
 requests
 beautifulsoup4
 sentence-transformers
@@ -6,6 +8,3 @@ torch
 playwright
 nltk
 tzdata
-flask
-werkzeug
-flask-sock
