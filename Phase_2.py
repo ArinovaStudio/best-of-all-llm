@@ -25,6 +25,12 @@ Features:
 """
 
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("WARNING: python-dotenv not installed; relying on real environment variables only.")
+
 import re
 import sys
 import time
@@ -82,6 +88,7 @@ GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
 
 
 FOURSQUARE_API_KEY = os.getenv("FOURSQUARE_API_KEY")
+GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY")
 
 
 W_PREF = 0.30
@@ -176,6 +183,28 @@ DISH_KEYWORDS = {
     "vegan":["vegan","plant-based"],
     "salad":["salad","fruit salad"]
 }
+
+# Geoapify uses its own category taxonomy (not OSM amenity/shop tags).
+# https://apidocs.geoapify.com/docs/places/#categories
+DISH2GEOAPIFY = {
+    "coffee": "catering.cafe",
+    "tea": "catering.cafe",
+    "burger": "catering.fast_food,catering.restaurant",
+    "pizza": "catering.restaurant,catering.fast_food",
+    "biryani": "catering.restaurant",
+    "cheesecake": "catering.cafe,bakery",
+    "pastry": "catering.cafe,bakery",
+    "vegan": "catering.restaurant,catering.cafe",
+    "salad": "catering.restaurant",
+    "default": "catering.restaurant,catering.cafe,catering.fast_food,bakery",
+}
+
+def get_geoapify_categories_for_dish(dish: str) -> str:
+    d = dish.lower()
+    for k in DISH2GEOAPIFY:
+        if k in d:
+            return DISH2GEOAPIFY[k]
+    return DISH2GEOAPIFY["default"]
 
 def get_filters_and_keywords_for_dish(dish: str):
     d = dish.lower()
@@ -333,6 +362,60 @@ def overpass_query_places(lat: float, lon: float, radius_m: int = 3000, limit: i
                 logging.warning(f"Overpass unexpected error at {ep}: {e}")
                 break
     logging.warning("All Overpass endpoints failed or returned no data.")
+    return []
+
+def geoapify_query_places(lat: float, lon: float, radius_m: int = 3000, limit: int = 60,
+                           categories: str = "catering.restaurant,catering.cafe,catering.fast_food,bakery",
+                           max_retries: int = 3) -> List[Dict[str, Any]]:
+    """
+    Drop-in replacement for overpass_query_places(). Same return shape:
+    [{"id", "type", "lat", "lon", "tags": {...}, "source"}, ...]
+    """
+    if not GEOAPIFY_API_KEY:
+        logging.warning("No GEOAPIFY_API_KEY set; skipping Geoapify query.")
+        return []
+
+    url = "https://api.geoapify.com/v2/places"
+    params = {
+        "categories": categories,
+        "filter": f"circle:{lon},{lat},{radius_m}",
+        "limit": limit,
+        "apiKey": GEOAPIFY_API_KEY,
+    }
+
+    attempt = 0
+    wait = 1.0
+    while attempt < max_retries:
+        attempt += 1
+        try:
+            r = requests.get(url, params=params, headers={"Accept": "application/json"}, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            results = []
+            for feature in data.get("features", []):
+                props = feature.get("properties", {})
+                coords = feature.get("geometry", {}).get("coordinates", [None, None])
+                results.append({
+                    "id": props.get("place_id"),
+                    "type": "node",
+                    "lat": coords[1],
+                    "lon": coords[0],
+                    "tags": {
+                        "name": props.get("name"),
+                        "address": props.get("formatted"),
+                        "categories": props.get("categories"),
+                    },
+                    "source": "geoapify",
+                })
+            return results
+        except RequestException as e:
+            logging.warning(f"Geoapify attempt {attempt} failed: {e}")
+            time.sleep(wait)
+            wait *= 2.0
+        except Exception as e:
+            logging.warning(f"Geoapify unexpected error: {e}")
+            break
+    logging.warning("Geoapify query failed or returned no data.")
     return []
 
 # ---------------- GOOGLE / FOURSQUARE ----------------
@@ -1258,7 +1341,8 @@ async def find_places_extended(query: str,
     logging.info(f"Dish parsed: {dish} | filters: {filters} | keywords: {dish_keywords}")
 
     radius = preferred_radius_m
-    osm_places = overpass_query_places(lat, lon, radius_m=radius, limit=80, place_filters=filters)
+    geoapify_categories = get_geoapify_categories_for_dish(dish)
+    osm_places = geoapify_query_places(lat, lon, radius_m=radius, limit=80, categories=geoapify_categories)
 
     fallback_used = False
     if not osm_places:
@@ -1373,8 +1457,8 @@ async def find_places_extended(query: str,
                                 pass
                 google_results.extend(gres)
 
-        extra_filters = DISH2FILTERS.get("default")
-        more_osm = overpass_query_places(lat, lon, radius_m=expanded_radius, limit=120, place_filters=extra_filters)
+        extra_categories = DISH2GEOAPIFY.get("default")
+        more_osm = geoapify_query_places(lat, lon, radius_m=expanded_radius, limit=120, categories=extra_categories)
         more_enriched = await enrich_osm_results(more_osm[:60], lat, lon, dish_keywords, local_dt, concurrency=concurrency)
         osm_enriched.extend(more_enriched)
     else:

@@ -19,7 +19,17 @@ ENV PYTHONUNBUFFERED=1 \
 #    reuses the cached "pip install" layer instead of redoing it every
 #    time you rebuild after a code change. This makes rebuilds much faster.
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+
+RUN pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.8.0+cpu
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Playwright needs its own browser binaries downloaded separately from the
+# pip package — this is what was missing and caused
+# "BrowserType.launch: Executable doesn't exist" at runtime.
+RUN playwright install --with-deps chromium
 
 # 5. Now copy the actual application source files
 COPY api.py final.py nlp_layer.py Phase_2.py ./
